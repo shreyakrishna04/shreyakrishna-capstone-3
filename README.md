@@ -9,15 +9,16 @@
 
 ## Setup
 
-**Sandbox note — read this before Part 2:** this environment's IAM identity does not have `ecr:CreateRepository`, and IAM role creation cannot be completed with the permissions this lesson calls for. Concretely: there is no way to push the Docker image anywhere Lambda could pull it from, and no way to attach the policies Part 3 asks for. That means **Parts 2 through 5 cannot be run hands-on by students in this sandbox** — this is the same category of environment gap as the RDS block on Day 1 (still pending as of this writing), just on the deployment side instead of the database side.
+**Sandbox note — read this before Part 2:** this environment's IAM identity does not have `ecr:CreateRepository` — there is no way to push a Docker image anywhere Lambda could pull it from. That means **Parts 2, 4, and 5 cannot be run hands-on by students in this sandbox** — the same category of environment gap as the RDS block on Day 1 (still pending as of this writing), just on the deployment side instead of the database side. IAM role creation, however, *does* work here (with limits) — see Part 3.
 
 This isn't a reason to skip the lesson — it's a reason to teach it differently:
 
-- **Part 1 (the Lambda handler) is still fully hands-on.** It's plain Python — write `lambda_handler.py`, and test it by calling `handler(event, context)` directly with a mock `event` dict, no real Lambda, ECR, or IAM involved. Do this part for real.
-- **Parts 2–4 (Docker/ECR packaging, IAM roles, deploying the function) should be walked through as instructor-led explanation, not a hands-on exercise.** Read every command below and understand what it does and why — the concepts (why a container image instead of a zip package, what a least-privilege execution role looks like, what a Lambda deployment actually needs) are the point of this lesson regardless of whether the commands can run here. Narrate what would happen if you ran each one.
+- **Part 1 (the Lambda handler) is fully hands-on.** It's plain Python — write `lambda_handler.py`, and test it by calling `handler(event, context)` directly with a mock `event` dict, no real Lambda, ECR, or IAM involved. Do this part for real.
+- **Part 3 (IAM roles) is hands-on, with real limits.** `iam:CreateRole` and a scoped inline policy both work — see Part 3's callout for exactly what runs and what doesn't, and read the warning about these resources being permanent before running anything.
+- **Parts 2 and 4 (Docker/ECR packaging, deploying the function) should be walked through as instructor-led explanation, not a hands-on exercise.** Read every command below and understand what it does and why — the concepts (why a container image instead of a zip package, what a Lambda deployment actually needs) are the point of this lesson regardless of whether the commands can run here.
 - **Part 5 (testing the deployed system)** depends on Part 4 having actually deployed something — treat it as "here's how you'd verify this if you had a real deployment," not a live exercise.
 
-If GA's platform later grants `ecr:CreateRepository`/`ecr:PutImage` plus permission to attach a scoped custom policy to a Lambda execution role, revisit this lesson as fully hands-on — nothing about the code below would need to change, only the sandbox's permissions.
+If GA's platform later grants `ecr:CreateRepository`/`ecr:PutImage`, revisit Parts 2, 4, and 5 as fully hands-on — nothing about the code below would need to change, only the sandbox's permissions.
 
 ## Table of Contents
 
@@ -126,7 +127,9 @@ docker push "$ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/multi-agent-orchestrato
 
 ## Part 3: IAM Roles for Production
 
-> **⚠️ Explain, don't run:** this sandbox's identity cannot attach the broad managed policies below to any role — only a narrow, pre-approved set of managed policies can be attached here at all. Even where role/policy creation partially works, this identity can't clean those resources up afterward, so don't create real roles or policies to "just try it." Walk through what each command does and why a real production deployment needs it; treat this as a reading exercise.
+> **✅ Run this part for real — with two firm limits.** Role creation itself works in this sandbox, so do this hands-on rather than just reading it. But:
+> 1. **Attaching the three `*FullAccess` managed policies below will fail** with `AccessDenied` — this identity can only attach a narrow, pre-approved set of managed policies (the basic Lambda execution role used in the first `attach-role-policy` call works fine). Use the scoped inline policy shown further down instead — it actually works, and it's a better answer anyway (see the note below on why).
+> 2. **Whatever role and policy you create here, you cannot delete.** This identity has `iam:CreateRole` and `iam:PutRolePolicy` but not `iam:DeleteRolePolicy`, and a role can't be deleted while it still has a policy attached — so once you create it, it's permanent for the life of this AWS account. **Use a role name that includes your own name or initials** (e.g. `orchestrator-lambda-role-<yourname>`) so instructors can tell whose is whose later, and only create it once — don't experiment by creating and re-creating.
 
 Following the least-privilege principle from Module 3 Day 1's IAM lesson, scope this role to exactly what the orchestrator needs — no more.
 
@@ -135,15 +138,31 @@ cat > trust.json <<'EOF'
 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}
 EOF
 
-aws iam create-role --role-name orchestrator-lambda-role --assume-role-policy-document file://trust.json
+aws iam create-role --role-name orchestrator-lambda-role-<yourname> --assume-role-policy-document file://trust.json
 
-aws iam attach-role-policy --role-name orchestrator-lambda-role --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-aws iam attach-role-policy --role-name orchestrator-lambda-role --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
-aws iam attach-role-policy --role-name orchestrator-lambda-role --policy-arn arn:aws:iam::aws:policy/AmazonOpenSearchServiceFullAccess
-aws iam attach-role-policy --role-name orchestrator-lambda-role --policy-arn arn:aws:iam::aws:policy/AmazonRDSFullAccess
+aws iam attach-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
 ```
 
-> **Note:** These managed policies are used here for bootcamp simplicity. In a real production engagement, you'd write custom policies scoped to the specific resources (a single OpenSearch domain, a single RDS instance) rather than the full-access managed policies — the same least-privilege principle from Day 1, applied more strictly than time allows for in this lesson.
+The three commands below are what a real deployment would need for Bedrock, OpenSearch, and RDS access — **explain, don't run these specific ones**, since the managed `*FullAccess` policies are denied in this sandbox:
+
+```bash
+aws iam attach-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+aws iam attach-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-arn arn:aws:iam::aws:policy/AmazonOpenSearchServiceFullAccess
+aws iam attach-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-arn arn:aws:iam::aws:policy/AmazonRDSFullAccess
+```
+
+> **What actually works here, and why it's arguably the better lesson anyway:** a scoped **inline** policy via `put-role-policy` succeeds in this sandbox where the broad managed policies don't. This is a real, runnable stand-in — and it's exactly the least-privilege pattern the note below already says a production engagement should use instead of `*FullAccess`:
+> ```bash
+> cat > scoped-policy.json <<'EOF'
+> {"Version":"2012-10-17","Statement":[
+>   {"Effect":"Allow","Action":"bedrock:InvokeModel","Resource":"*"}
+> ]}
+> EOF
+> aws iam put-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-name orchestrator-inline-policy --policy-document file://scoped-policy.json
+> ```
+> Remember: this inline policy is also permanent once created (no `iam:DeleteRolePolicy` here) — write it once, get it right, don't iterate by trial and error.
+
+> **Note:** The `*FullAccess` managed policies above are what many teams reach for "for bootcamp simplicity," and it's worth understanding why they're tempting: one line, no need to enumerate exact actions. But a real production engagement should write custom policies scoped to the specific resources (a single OpenSearch domain, a single RDS instance) rather than full-access managed policies — the same least-privilege principle from Day 1. This sandbox's restriction, ironically, forces the stricter and more correct answer.
 
 ## Part 4: Deploying the Function
 
