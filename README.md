@@ -1,7 +1,3 @@
-Here's the document with every PowerShell block converted to bash (Ubuntu):
-
----
-
 # Deployment Patterns on AWS
 
 **Session Time:** 60 minutes
