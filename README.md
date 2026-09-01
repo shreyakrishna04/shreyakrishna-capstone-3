@@ -7,6 +7,18 @@
 - Building the Orchestrator (this morning)
 - Docker installed and running
 
+## Setup
+
+**Sandbox note — read this before Part 2:** this environment's IAM identity does not have `ecr:CreateRepository`, and IAM role creation cannot be completed with the permissions this lesson calls for. Concretely: there is no way to push the Docker image anywhere Lambda could pull it from, and no way to attach the policies Part 3 asks for. That means **Parts 2 through 5 cannot be run hands-on by students in this sandbox** — this is the same category of environment gap as the RDS block on Day 1 (still pending as of this writing), just on the deployment side instead of the database side.
+
+This isn't a reason to skip the lesson — it's a reason to teach it differently:
+
+- **Part 1 (the Lambda handler) is still fully hands-on.** It's plain Python — write `lambda_handler.py`, and test it by calling `handler(event, context)` directly with a mock `event` dict, no real Lambda, ECR, or IAM involved. Do this part for real.
+- **Parts 2–4 (Docker/ECR packaging, IAM roles, deploying the function) should be walked through as instructor-led explanation, not a hands-on exercise.** Read every command below and understand what it does and why — the concepts (why a container image instead of a zip package, what a least-privilege execution role looks like, what a Lambda deployment actually needs) are the point of this lesson regardless of whether the commands can run here. Narrate what would happen if you ran each one.
+- **Part 5 (testing the deployed system)** depends on Part 4 having actually deployed something — treat it as "here's how you'd verify this if you had a real deployment," not a live exercise.
+
+If GA's platform later grants `ecr:CreateRepository`/`ecr:PutImage` plus permission to attach a scoped custom policy to a Lambda execution role, revisit this lesson as fully hands-on — nothing about the code below would need to change, only the sandbox's permissions.
+
 ## Table of Contents
 
 - [Deployment Patterns on AWS](#deployment-patterns-on-aws)
@@ -43,7 +55,7 @@ Wrap this morning's orchestrator in a handler function matching the format Lambd
 # lambda_handler.py
 import json
 from orchestrator import build_orchestrator
-from tokenomics_logger import log_decision  # from this afternoon's earlier lesson
+from tokenomics_logger import run_traced_query  # from this afternoon's earlier lesson
 
 orchestrator = build_orchestrator()
 
@@ -55,10 +67,7 @@ def handler(event, context):
         if not question:
             return {"statusCode": 400, "body": json.dumps({"error": "question is required"})}
 
-        result = orchestrator.invoke({
-            "question": question, "route": None, "sql_result": None,
-            "retrieval_result": None, "final_answer": None, "token_usage": None
-        })
+        result = run_traced_query(orchestrator, question)
 
         sql_validation = None
         if result.get("sql_result"):
@@ -79,7 +88,19 @@ def handler(event, context):
 
 Notice the `sql_validation` field is explicitly surfaced in the response — this is a direct continuation of Day 2's Trust but Verify principle: the validation status should be visible in the system's output, not hidden inside internal logic.
 
+> **Bug this fixes:** an earlier version of this handler called `orchestrator.invoke(...)` directly and imported `log_decision` without ever calling it — meaning the CloudWatch decision-trace claimed in Part 5's check below would never actually appear, since nothing in the handler wrote to it. Calling `run_traced_query` (from this afternoon's earlier tokenomics lesson) instead of the bare `orchestrator.invoke` is what actually produces that trace.
+
+> **✅ Check (do this now, hands-on):** call the handler directly with a mock event, no Lambda required:
+> ```python
+> from lambda_handler import handler
+> event = {"body": '{"question": "How many active projects do we have?"}'}
+> print(handler(event, None))
+> ```
+> Confirm you get back a 200 status with `answer`, `route`, `sql_validation`, and `token_usage` all populated — this is the actual logic Lambda would run, so testing it this way catches real bugs even though it never touches AWS.
+
 ## Part 2: Packaging with Docker
+
+> **⚠️ Explain, don't run:** `docker build` works fine locally (Docker itself isn't restricted), but `aws ecr create-repository` and the subsequent `docker push` will fail — this sandbox's IAM identity doesn't have `ecr:CreateRepository`. There's nowhere to push the image to. Read through this section to understand what packaging a Python app for Lambda actually involves; don't expect the `aws ecr`/`docker push` commands below to succeed.
 
 ```dockerfile
 FROM public.ecr.aws/lambda/python:3.11
@@ -105,6 +126,8 @@ docker push "$ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/multi-agent-orchestrato
 
 ## Part 3: IAM Roles for Production
 
+> **⚠️ Explain, don't run:** this sandbox's identity cannot attach the broad managed policies below to any role — only a narrow, pre-approved set of managed policies can be attached here at all. Even where role/policy creation partially works, this identity can't clean those resources up afterward, so don't create real roles or policies to "just try it." Walk through what each command does and why a real production deployment needs it; treat this as a reading exercise.
+
 Following the least-privilege principle from Module 3 Day 1's IAM lesson, scope this role to exactly what the orchestrator needs — no more.
 
 ```bash
@@ -123,6 +146,8 @@ aws iam attach-role-policy --role-name orchestrator-lambda-role --policy-arn arn
 > **Note:** These managed policies are used here for bootcamp simplicity. In a real production engagement, you'd write custom policies scoped to the specific resources (a single OpenSearch domain, a single RDS instance) rather than the full-access managed policies — the same least-privilege principle from Day 1, applied more strictly than time allows for in this lesson.
 
 ## Part 4: Deploying the Function
+
+> **⚠️ Explain, don't run:** this depends on Part 2's image already existing in ECR, which isn't possible here. Read through the `aws lambda create-function` call and understand what each flag configures (image location, execution role, timeout, memory, environment variables) — this is exactly what the capstone's Lambda deployment does, so understanding it now matters even without running it today.
 
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -143,6 +168,8 @@ aws lambda create-function \
 
 ## Part 5: Testing the Deployed System
 
+> **⚠️ Explain, don't run:** there's no deployed function to test against in this sandbox. This is "here's how you'd verify a real deployment," not a live exercise today — the pattern (invoke, check the response fields, tail the logs) is exactly what you'd do once the capstone or a future engagement has real ECR/Lambda access.
+
 ```bash
 cat > test_event.json <<'EOF'
 {"body": "{\"question\": \"How many active projects do we have?\"}"}
@@ -158,18 +185,9 @@ cat response.json
 aws logs tail /aws/lambda/multi-agent-orchestrator --follow
 ```
 
-> **✅ Check:** Confirm your response includes `answer`, `route`, `sql_validation`, and `token_usage` fields, and that CloudWatch Logs show the decision trace from this afternoon's earlier lesson. This is the same deployment your capstone will build on directly.
+> **✅ Check (what you can actually verify today):** you already confirmed the `answer`, `route`, `sql_validation`, and `token_usage` fields and the decision-trace logging back in Part 1's local `handler(event, None)` test — that's the same response shape and the same logging a real deployed Lambda would produce. This is the same deployment your capstone will build on directly, once ECR/Lambda access is available.
 
 ## Resources
 
 - [AWS Lambda Container Images](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html)
 - [AWS IAM Best Practices](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html)
-
----
-
-Conversion notes:
-- `$VAR = (cmd)` → `VAR=$(cmd)` (no spaces around `=`).
-- `Set-Content -Path f -Value '...'` → `cat > f <<'EOF' ... EOF` (quoted `EOF` prevents shell expansion of the JSON).
-- `Get-Content f` → `cat f`.
-- Backtick line-continuation → trailing backslash `\`.
-- `arn:aws:iam::$ACCOUNT_ID`:role...` (PowerShell backtick-escaped colon) → plain `arn:aws:iam::$ACCOUNT_ID:role...`.
