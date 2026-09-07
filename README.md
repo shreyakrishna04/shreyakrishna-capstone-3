@@ -9,7 +9,9 @@
 
 ## Setup
 
-**Sandbox note — read this before Part 2:** this environment's IAM identity does not have `ecr:CreateRepository` — there is no way to push a Docker image anywhere Lambda could pull it from. That means **Parts 2, 4, and 5 cannot be run hands-on by students in this sandbox** — the same category of environment gap as the RDS block on Day 1 (still pending as of this writing), just on the deployment side instead of the database side. IAM role creation, however, *does* work here (with limits) — see Part 3.
+**Sandbox note — read this before Part 2:** this environment's IAM identity does not have `ecr:CreateRepository` — there is no way to push a Docker image anywhere Lambda could pull it from. That means **Parts 2, 4, and 5 cannot be run hands-on by students in this sandbox**. IAM role creation, however, *does* work here (with limits) — see Part 3.
+
+> **Update:** an earlier draft of this note also lumped RDS in with the ECR gap, calling it "the same category of environment gap ... on the database side." That's been corrected — confirmed directly, RDS itself is **not** blocked in this sandbox: provisioning a `db.t3.micro` instance, connecting to it, and deleting it all work fine. What *is* still denied is attaching the broad `AmazonRDSFullAccess` managed policy to an IAM role (see Part 3) — a narrower, different restriction than "RDS is inaccessible." If you hit an RDS error elsewhere in this course, check first whether you used `admin` as the master username — that's rejected by the Postgres engine itself as a reserved word, independent of any sandbox restriction, and is the most likely cause.
 
 This isn't a reason to skip the lesson — it's a reason to teach it differently:
 
@@ -180,8 +182,10 @@ aws lambda create-function \
   --role "$ROLE_ARN" \
   --timeout 120 \
   --memory-size 512 \
-  --environment Variables="{ANTHROPIC_API_KEY=your_key,AWS_REGION=us-east-1,OPENSEARCH_ENDPOINT=your_endpoint,OPENSEARCH_INDEX=documents,RDS_HOST=your_host,RDS_PORT=5432,RDS_DATABASE=bootcamp,RDS_USER=admin,RDS_PASSWORD=your_password}"
+  --environment Variables="{ANTHROPIC_API_KEY=your_key,AWS_REGION=us-east-1,OPENSEARCH_ENDPOINT=your_endpoint,OPENSEARCH_INDEX=documents,RDS_HOST=your_host,RDS_PORT=5432,RDS_DATABASE=bootcamp,RDS_USER=dbadmin,RDS_PASSWORD=your_password}"
 ```
+
+> **⚠️ Don't use `admin` as `RDS_USER`.** RDS rejects it outright as the master username for the `postgres` engine — `MasterUsername admin cannot be used as it is a reserved word used by the engine`. Use `dbadmin` (shown above) or any other non-reserved name, matching whatever you set during RDS provisioning.
 
 > **⚠️ Common issue:** Lambda timeout on multi-agent queries, especially "both"-routed questions calling two agents plus synthesis. The default 3-second timeout will fail almost every time — 120 seconds gives enough headroom.
 
