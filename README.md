@@ -1,7 +1,5 @@
 # Deployment Patterns on AWS
 
-**Session Time:** 60 minutes
-
 ## Prerequisites
 
 - Building the Orchestrator (this morning)
@@ -38,11 +36,12 @@ If GA's platform later grants `ecr:CreateRepository`/`ecr:PutImage`, revisit Par
 
 ## Learning Objectives
 
-- Explain why Lambda is a good fit for this orchestrator's deployment
-- Wrap a LangGraph orchestrator in a Lambda handler function
-- Package a Python application with dependencies as a Docker container image for Lambda
-- Configure least-privilege IAM roles for a production Lambda deployment
-- Deploy and test the function with a live invocation
+By the end of this lesson, you will be able to:
+- Explain why AWS Lambda is an appropriate deployment option for the orchestrator
+- Implement a Lambda handler that invokes the LangGraph orchestrator and returns a structured response
+- Describe how a Python application can be packaged and deployed to Lambda using a container image
+- Apply least-privilege IAM principles when defining permissions for a Lambda-based orchestrator
+- Evaluate a Lambda deployment by reviewing its configuration, response, and observability outputs
 
 ## Why Lambda for This System
 
