@@ -1,45 +1,47 @@
 # Deployment Patterns on AWS
 
-## Prerequisites
-
-- Building the Orchestrator (this morning)
-- Docker installed and running
-
-## Setup
-
-**Sandbox note — read this before Part 2:** this environment's IAM identity does not have `ecr:CreateRepository` — there is no way to push a Docker image anywhere Lambda could pull it from. That means **Parts 2, 4, and 5 cannot be run hands-on by students in this sandbox**. IAM role creation, however, *does* work here (with limits) — see Part 3.
-
-> **Update:** an earlier draft of this note also lumped RDS in with the ECR gap, calling it "the same category of environment gap ... on the database side." That's been corrected — confirmed directly, RDS itself is **not** blocked in this sandbox: provisioning a `db.t3.micro` instance, connecting to it, and deleting it all work fine. What *is* still denied is attaching the broad `AmazonRDSFullAccess` managed policy to an IAM role (see Part 3) — a narrower, different restriction than "RDS is inaccessible." If you hit an RDS error elsewhere in this course, check first whether you used `admin` as the master username — that's rejected by the Postgres engine itself as a reserved word, independent of any sandbox restriction, and is the most likely cause.
-
-This isn't a reason to skip the lesson — it's a reason to teach it differently:
-
-- **Part 1 (the Lambda handler) is fully hands-on.** It's plain Python — write `lambda_handler.py`, and test it by calling `handler(event, context)` directly with a mock `event` dict, no real Lambda, ECR, or IAM involved. Do this part for real.
-- **Part 3 (IAM roles) is hands-on, with real limits.** `iam:CreateRole` and a scoped inline policy both work — see Part 3's callout for exactly what runs and what doesn't, and read the warning about these resources being permanent before running anything.
-- **Parts 2 and 4 (Docker/ECR packaging, deploying the function) should be walked through as instructor-led explanation, not a hands-on exercise.** Read every command below and understand what it does and why — the concepts (why a container image instead of a zip package, what a Lambda deployment actually needs) are the point of this lesson regardless of whether the commands can run here.
-- **Part 5 (testing the deployed system)** depends on Part 4 having actually deployed something — treat it as "here's how you'd verify this if you had a real deployment," not a live exercise.
-
-If GA's platform later grants `ecr:CreateRepository`/`ecr:PutImage`, revisit Parts 2, 4, and 5 as fully hands-on — nothing about the code below would need to change, only the sandbox's permissions.
-
 ## Table of Contents
 
 - [Deployment Patterns on AWS](#deployment-patterns-on-aws)
   - [Prerequisites](#prerequisites)
+  - [Introduction](#introduction)
+  - [Setup](#setup)
   - [Table of Contents](#table-of-contents)
   - [Learning Objectives](#learning-objectives)
   - [Why Lambda for This System](#why-lambda-for-this-system)
   - [Part 1: The Lambda Handler](#part-1-the-lambda-handler)
-  - [Part 2: Packaging with Docker](#part-2-packaging-with-docker)
+  - [Part 2: Packaging with a Lambda Layer](#part-2-packaging-with-a-lambda-layer)
   - [Part 3: IAM Roles for Production](#part-3-iam-roles-for-production)
   - [Part 4: Deploying the Function](#part-4-deploying-the-function)
   - [Part 5: Testing the Deployed System](#part-5-testing-the-deployed-system)
   - [Resources](#resources)
+
+## Prerequisites
+
+- Building the Orchestrator (this morning)
+
+## Introduction
+
+Everything you've built this week has run in a notebook or a terminal — a real system needs to run without you there to start it. This lesson is about the mechanics of that step: packaging your orchestrator's dependencies, giving it the narrow set of permissions it actually needs (not the broad ones that are easiest to grant), and deploying it somewhere that responds to a request and then goes quiet until the next one. Lambda's request-response shape fits your orchestrator's actual behavior well. This version of the lesson is built specifically around this sandbox's confirmed permissions — a zip-based Lambda deployment with a dependencies layer, which needs no container registry access at all, so every part below is meant to be run hands-on, not just read.
+
+## Setup
+
+**Sandbox notes — read before starting:**
+
+- **RDS works fine here.** Provisioning a `db.t3.micro` instance, connecting to it, and deleting it all work as expected — RDS itself is not restricted in this sandbox. What *is* restricted is attaching the broad `AmazonRDSFullAccess` managed policy to an IAM role (see Part 3) — a narrower, different restriction than "RDS is inaccessible." If you hit an RDS error elsewhere in this course, check first whether you used `admin` as the master username — that's rejected by the Postgres engine itself as a reserved word, independent of any sandbox restriction, and is the most likely cause.
+- **IAM role creation works, with real limits** — see Part 3 for exactly what does and doesn't work, and read the warning about these resources being permanent before running anything there.
+- **Lambda and CloudWatch Logs permissions haven't been explicitly confirmed for this exact sandbox** the way RDS and IAM have. Part 1's local handler test needs neither, so start there regardless. Treat Part 4's actual `aws lambda create-function` call as the first real test of whether this sandbox's identity can deploy a function at all — if it fails with an authorization error, that's a new, real constraint worth reporting the same way the ECR gap was found, not a sign you did something wrong.
+
+```bash
+cd ~/bootcamp/building-the-orchestrator   # wherever this morning's project lives
+```
 
 ## Learning Objectives
 
 By the end of this lesson, you will be able to:
 - Explain why AWS Lambda is an appropriate deployment option for the orchestrator
 - Implement a Lambda handler that invokes the LangGraph orchestrator and returns a structured response
-- Describe how a Python application can be packaged and deployed to Lambda using a container image
+- Describe how a Python application's dependencies can be packaged as a Lambda layer, separate from the function's own code
 - Apply least-privilege IAM principles when defining permissions for a Lambda-based orchestrator
 - Evaluate a Lambda deployment by reviewing its configuration, response, and observability outputs
 
@@ -47,7 +49,7 @@ By the end of this lesson, you will be able to:
 
 Your orchestrator doesn't need to run continuously — it responds to incoming questions and returns an answer. This request-response pattern with no need for constant uptime is exactly what Lambda is designed for: you pay only for the compute time actually used, and AWS handles all the underlying server management.
 
-The tradeoff, and why we're using a **container image** rather than a plain zip-file Lambda deployment: your orchestrator has several dependencies (LangGraph, Anthropic SDK, database drivers, OpenSearch client) that together exceed the size limits of a standard zip-based Lambda package. Container images support a much larger deployment size, which is why this is the standard pattern for dependency-heavy Python Lambda functions.
+The tradeoff: your orchestrator has several dependencies (LangGraph, database drivers, an OpenSearch client, Sentence Transformers) that together exceed the size limit for a Lambda function package deployed directly. Rather than reaching for a container image to solve this, split the dependencies into a **Lambda layer** — a separate zip uploaded once and attached to the function — so the function's own package stays small and fast to update, while the layer holds everything the function imports.
 
 ## Part 1: The Lambda Handler
 
@@ -92,45 +94,64 @@ Notice the `sql_validation` field is explicitly surfaced in the response — thi
 
 > **Bug this fixes:** an earlier version of this handler called `orchestrator.invoke(...)` directly and imported `log_decision` without ever calling it — meaning the CloudWatch decision-trace claimed in Part 5's check below would never actually appear, since nothing in the handler wrote to it. Calling `run_traced_query` (from this afternoon's earlier tokenomics lesson) instead of the bare `orchestrator.invoke` is what actually produces that trace.
 
-> **✅ Check (do this now, hands-on):** call the handler directly with a mock event, no Lambda required:
+> **✅ Check:** call the handler directly with a mock event, no Lambda required:
 > ```python
 > from lambda_handler import handler
 > event = {"body": '{"question": "How many active projects do we have?"}'}
 > print(handler(event, None))
 > ```
-> Confirm you get back a 200 status with `answer`, `route`, `sql_validation`, and `token_usage` all populated — this is the actual logic Lambda would run, so testing it this way catches real bugs even though it never touches AWS.
+> Confirm you get back a 200 status with `answer`, `route`, `sql_validation`, and `token_usage` all populated — this is the actual logic Lambda would run, so testing it this way catches real bugs even before anything touches AWS.
 
-## Part 2: Packaging with Docker
+## Part 2: Packaging with a Lambda Layer
 
-> **⚠️ Explain, don't run:** `docker build` works fine locally (Docker itself isn't restricted), but `aws ecr create-repository` and the subsequent `docker push` will fail — this sandbox's IAM identity doesn't have `ecr:CreateRepository`. There's nowhere to push the image to. Read through this section to understand what packaging a Python app for Lambda actually involves; don't expect the `aws ecr`/`docker push` commands below to succeed.
+Keep the function package itself small — just your own code — and put every dependency into one or more separate layers.
 
-```dockerfile
-FROM public.ecr.aws/lambda/python:3.11
-COPY requirements.txt .
-RUN pip install -r requirements.txt --target .
-COPY . .
-CMD ["lambda_handler.handler"]
-```
+`sentence-transformers` (used by your Retrieval Agent for embeddings) pulls in PyTorch, which is large enough to risk exceeding a Lambda layer's 250MB unzipped limit on its own. Split dependencies across two layers rather than one, so a size problem in the heavy layer doesn't block everything else:
 
 ```bash
-docker build -t multi-agent-orchestrator .
+# Layer 1: everything except sentence-transformers
+mkdir -p layer-core/python
+pip install langgraph boto3 psycopg2-binary opensearch-py requests-aws4auth python-dotenv \
+  -t layer-core/python --break-system-packages
+cd layer-core && zip -r ../orchestrator-core-layer.zip . && cd ..
 
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com"
+aws lambda publish-layer-version \
+  --layer-name orchestrator-core-deps \
+  --zip-file fileb://orchestrator-core-layer.zip \
+  --compatible-runtimes python3.11
 
-aws ecr create-repository --repository-name multi-agent-orchestrator --region us-east-1
+# Layer 2: sentence-transformers, kept separate because of its size
+mkdir -p layer-embeddings/python
+pip install sentence-transformers -t layer-embeddings/python --break-system-packages
+cd layer-embeddings && zip -r ../orchestrator-embeddings-layer.zip . && cd ..
 
-docker tag multi-agent-orchestrator:latest "$ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/multi-agent-orchestrator:latest"
-docker push "$ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/multi-agent-orchestrator:latest"
+aws lambda publish-layer-version \
+  --layer-name orchestrator-embeddings-deps \
+  --zip-file fileb://orchestrator-embeddings-layer.zip \
+  --compatible-runtimes python3.11
 ```
 
-> **⚠️ Common issue:** Build failures related to `psycopg2` are almost always solved by using `psycopg2-binary` in `requirements.txt` instead of `psycopg2` — the binary package avoids native dependency compilation inside the Lambda container image.
+Note the returned `LayerVersionArn` from **both** commands — you'll attach both to the function in Part 4.
+
+```bash
+# Package just your own code — no dependencies bundled here
+mkdir -p function_package
+cp lambda_handler.py orchestrator.py tokenomics_logger.py function_package/
+cp -r agents/ function_package/
+
+cd function_package && zip -r ../orchestrator_function.zip . && cd ..
+```
+
+> **⚠️ Common issue:** `psycopg2` build failures are almost always solved by using `psycopg2-binary` in the pip install above, not `psycopg2` — the binary package avoids native dependency compilation, which matters here since the layer is built on your local machine, not necessarily the same OS/architecture Lambda runs on. If you hit an import error at runtime specifically (not at build time), rebuild the layer using the `--platform manylinux2014_x86_64 --only-binary=:all:` pip flags to force Lambda-compatible wheels.
+
+> **⚠️ Common issue:** if the embeddings layer still exceeds the 250MB unzipped limit after being split out on its own, that's a real constraint worth reporting rather than working around blindly — a common production answer is moving embedding generation to its own dedicated service rather than bundling it into the same function as the orchestrator, but that's a bigger architectural change than this lesson expects you to make today.
 
 ## Part 3: IAM Roles for Production
 
-> **✅ Run this part for real — with two firm limits.** Role creation itself works in this sandbox, so do this hands-on rather than just reading it. But:
-> 1. **Attaching the three `*FullAccess` managed policies below will fail** with `AccessDenied` — this identity can only attach a narrow, pre-approved set of managed policies (the basic Lambda execution role used in the first `attach-role-policy` call works fine). Use the scoped inline policy shown further down instead — it actually works, and it's a better answer anyway (see the note below on why).
-> 2. **Whatever role and policy you create here, you cannot delete.** This identity has `iam:CreateRole` and `iam:PutRolePolicy` but not `iam:DeleteRolePolicy`, and a role can't be deleted while it still has a policy attached — so once you create it, it's permanent for the life of this AWS account. **Use a role name that includes your own name or initials** (e.g. `orchestrator-lambda-role-<yourname>`) so instructors can tell whose is whose later, and only create it once — don't experiment by creating and re-creating.
+**Run this part for real — with two firm limits, confirmed in this sandbox:**
+
+1. **Attaching the three `*FullAccess` managed policies below will fail** with `AccessDenied` — this identity can only attach a narrow, pre-approved set of managed policies (the basic Lambda execution role used in the first `attach-role-policy` call works fine). Use the scoped inline policy shown further down instead — it actually works, and it's a better answer anyway (see the note below on why).
+2. **Whatever role and policy you create here, you cannot delete.** This identity has `iam:CreateRole` and `iam:PutRolePolicy` but not `iam:DeleteRolePolicy`, and a role can't be deleted while it still has a policy attached — so once you create it, it's permanent for the life of this AWS account. **Use a role name that includes your own name or initials** (e.g. `orchestrator-lambda-role-<yourname>`) so instructors can tell whose is whose later, and only create it once — don't experiment by creating and re-creating.
 
 Following the least-privilege principle from Module 3 Day 1's IAM lesson, scope this role to exactly what the orchestrator needs — no more.
 
@@ -167,30 +188,35 @@ aws iam attach-role-policy --role-name orchestrator-lambda-role-<yourname> --pol
 
 ## Part 4: Deploying the Function
 
-> **⚠️ Explain, don't run:** this depends on Part 2's image already existing in ECR, which isn't possible here. Read through the `aws lambda create-function` call and understand what each flag configures (image location, execution role, timeout, memory, environment variables) — this is exactly what the capstone's Lambda deployment does, so understanding it now matters even without running it today.
-
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-IMAGE_URI="$ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/multi-agent-orchestrator:latest"
-ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/orchestrator-lambda-role"
+ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/orchestrator-lambda-role-<yourname>"
+CORE_LAYER_ARN="<paste the LayerVersionArn from the core-deps layer here>"
+EMBEDDINGS_LAYER_ARN="<paste the LayerVersionArn from the embeddings layer here>"
 
 aws lambda create-function \
   --function-name multi-agent-orchestrator \
-  --package-type Image \
-  --code ImageUri="$IMAGE_URI" \
+  --runtime python3.11 \
+  --handler lambda_handler.handler \
+  --zip-file fileb://orchestrator_function.zip \
   --role "$ROLE_ARN" \
+  --layers "$CORE_LAYER_ARN" "$EMBEDDINGS_LAYER_ARN" \
   --timeout 120 \
   --memory-size 512 \
-  --environment Variables="{ANTHROPIC_API_KEY=your_key,AWS_REGION=us-east-1,OPENSEARCH_ENDPOINT=your_endpoint,OPENSEARCH_INDEX=documents,RDS_HOST=your_host,RDS_PORT=5432,RDS_DATABASE=bootcamp,RDS_USER=dbadmin,RDS_PASSWORD=your_password}"
+  --environment "Variables={AWS_REGION=us-east-1,OPENSEARCH_ENDPOINT=your_endpoint,OPENSEARCH_INDEX=documents,RDS_HOST=your_host,RDS_PORT=5432,RDS_DATABASE=bootcamp,RDS_USER=dbadmin,RDS_PASSWORD=your_password}"
 ```
+
+> **Note what's *not* in that environment variable list:** no `ANTHROPIC_API_KEY`. Nothing in this orchestrator calls anything but `bedrock_client.py`'s `invoke_claude()`, which authenticates through the Lambda's own IAM role, not an API key — there's no code path anywhere in this stack that would ever read that variable.
 
 > **⚠️ Don't use `admin` as `RDS_USER`.** RDS rejects it outright as the master username for the `postgres` engine — `MasterUsername admin cannot be used as it is a reserved word used by the engine`. Use `dbadmin` (shown above) or any other non-reserved name, matching whatever you set during RDS provisioning.
 
 > **⚠️ Common issue:** Lambda timeout on multi-agent queries, especially "both"-routed questions calling two agents plus synthesis. The default 3-second timeout will fail almost every time — 120 seconds gives enough headroom.
 
-## Part 5: Testing the Deployed System
+> **⚠️ If this specific command fails with an authorization error:** that's new, useful information about this sandbox's actual permissions, not a mistake in the steps above — note exactly which action was denied (it'll be in the error message) and flag it the same way the ECR restriction was found, so this lesson can be corrected again if needed.
 
-> **⚠️ Explain, don't run:** there's no deployed function to test against in this sandbox. This is "here's how you'd verify a real deployment," not a live exercise today — the pattern (invoke, check the response fields, tail the logs) is exactly what you'd do once the capstone or a future engagement has real ECR/Lambda access.
+> **If you update your code after this initial deploy**, use `aws lambda update-function-code --function-name multi-agent-orchestrator --zip-file fileb://orchestrator_function.zip` — you only need to touch the layers again if your dependencies themselves change, not your own code.
+
+## Part 5: Testing the Deployed System
 
 ```bash
 cat > test_event.json <<'EOF'
@@ -207,9 +233,10 @@ cat response.json
 aws logs tail /aws/lambda/multi-agent-orchestrator --follow
 ```
 
-> **✅ Check (what you can actually verify today):** you already confirmed the `answer`, `route`, `sql_validation`, and `token_usage` fields and the decision-trace logging back in Part 1's local `handler(event, None)` test — that's the same response shape and the same logging a real deployed Lambda would produce. This is the same deployment your capstone will build on directly, once ECR/Lambda access is available.
+> **✅ Check:** Confirm your response includes `answer`, `route`, `sql_validation`, and `token_usage` fields, and that CloudWatch Logs show the decision trace from Part 1's `run_traced_query` call. Compare this against what you already saw locally in Part 1 — same response shape, same trace, now coming from an actual deployed Lambda instead of a direct function call. This is the same deployment your capstone builds on directly.
 
 ## Resources
 
-- [AWS Lambda Container Images](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html)
+- [AWS Lambda Layers](https://docs.aws.amazon.com/lambda/latest/dg/chapter-layers.html)
+- [AWS Lambda Deployment Packages (.zip)](https://docs.aws.amazon.com/lambda/latest/dg/python-package.html)
 - [AWS IAM Best Practices](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html)
