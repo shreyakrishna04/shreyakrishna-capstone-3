@@ -1,159 +1,164 @@
 # Deployment Patterns on AWS
 
-## Table of Contents
-
-- [Deployment Patterns on AWS](#deployment-patterns-on-aws)
-  - [Prerequisites](#prerequisites)
-  - [Introduction](#introduction)
-  - [Setup](#setup)
-  - [Table of Contents](#table-of-contents)
-  - [Learning Objectives](#learning-objectives)
-  - [Why Lambda for This System](#why-lambda-for-this-system)
-  - [Part 1: The Lambda Handler](#part-1-the-lambda-handler)
-  - [Part 2: Packaging with a Lambda Layer](#part-2-packaging-with-a-lambda-layer)
-  - [Part 3: IAM Roles for Production](#part-3-iam-roles-for-production)
-  - [Part 4: Deploying the Function](#part-4-deploying-the-function)
-  - [Part 5: Testing the Deployed System](#part-5-testing-the-deployed-system)
-  - [Resources](#resources)
-
 ## Prerequisites
 
 - Building the Orchestrator (this morning)
 
 ## Introduction
 
-Everything you've built this week has run in a notebook or a terminal — a real system needs to run without you there to start it. This lesson is about the mechanics of that step: packaging your orchestrator's dependencies, giving it the narrow set of permissions it actually needs (not the broad ones that are easiest to grant), and deploying it somewhere that responds to a request and then goes quiet until the next one. Lambda's request-response shape fits your orchestrator's actual behavior well. This version of the lesson is built specifically around this sandbox's confirmed permissions — a zip-based Lambda deployment with a dependencies layer, which needs no container registry access at all, so every part below is meant to be run hands-on, not just read.
+Everything you've built this week has run in a notebook or a terminal — a real system needs to run without you there to start it. This lesson is about that step, and it earned its final form the hard way: through a real, multi-hour debugging session that hit a genuine dead end (a dependency too large to bundle at all, regardless of packaging method), a Python version mismatch, three separate "this looks safe to remove" guesses that turned out wrong, and a race condition in how we verified success. Every fact and warning below was confirmed by actually running the failing command and reading the real result — not inferred from documentation. If you follow this lesson exactly as written, you should not hit any of these problems yourself; they're baked into the instructions below specifically so you don't have to rediscover them.
 
-## Setup
+## What's Actually Confirmed About This Sandbox
 
-**Sandbox notes — read before starting:**
+| Action | Status | How we know |
+|---|---|---|
+| `lambda:CreateFunction` (zip, direct upload or from S3) | **Works** | Created and invoked real functions both ways |
+| `lambda:InvokeFunction`, `lambda:DeleteFunction` | **Works** | Confirmed repeatedly |
+| `lambda:PublishLayerVersion` | **Blocked** | `AccessDeniedException`, confirmed directly |
+| `ecr:CreateRepository` / `DescribeRepositories` | **Blocked** | `AccessDeniedException`, confirmed directly |
+| `iam:CreateRole`, `AttachRolePolicy` (basic execution policy), `PutRolePolicy` (inline) | **Works** | Real role created and used throughout |
+| `iam:AttachRolePolicy` (`*FullAccess` managed policies) | **Blocked** | Only a narrow, pre-approved policy set can be attached |
+| `iam:DeleteRolePolicy` / role deletion | **Blocked** | Roles and policies are permanent once created |
+| `s3:CreateBucket`, upload, read | **Works** | Confirmed directly |
+| RDS and OpenSearch provisioning, connecting, deleting | **Works** | A full real deployment was built and torn down on both |
 
-- **RDS works fine here.** Provisioning a `db.t3.micro` instance, connecting to it, and deleting it all work as expected — RDS itself is not restricted in this sandbox. What *is* restricted is attaching the broad `AmazonRDSFullAccess` managed policy to an IAM role (see Part 3) — a narrower, different restriction than "RDS is inaccessible." If you hit an RDS error elsewhere in this course, check first whether you used `admin` as the master username — that's rejected by the Postgres engine itself as a reserved word, independent of any sandbox restriction, and is the most likely cause.
-- **IAM role creation works, with real limits** — see Part 3 for exactly what does and doesn't work, and read the warning about these resources being permanent before running anything there.
-- **Lambda and CloudWatch Logs permissions haven't been explicitly confirmed for this exact sandbox** the way RDS and IAM have. Part 1's local handler test needs neither, so start there regardless. Treat Part 4's actual `aws lambda create-function` call as the first real test of whether this sandbox's identity can deploy a function at all — if it fails with an authorization error, that's a new, real constraint worth reporting the same way the ECR gap was found, not a sign you did something wrong.
-
-```bash
-cd ~/bootcamp/building-the-orchestrator   # wherever this morning's project lives
-```
+**What follows from this:** no layers, no container images — one combined deployment package, deployed via S3 (well over the 50MB direct-upload limit once dependencies are included). Use a role name that includes your own name or initials — it's permanent for the life of this account.
 
 ## Learning Objectives
 
 By the end of this lesson, you will be able to:
-- Explain why AWS Lambda is an appropriate deployment option for the orchestrator
-- Implement a Lambda handler that invokes the LangGraph orchestrator and returns a structured response
-- Describe how a Python application's dependencies can be packaged as a Lambda layer, separate from the function's own code
+- Package a Python application's dependencies into a single Lambda deployment package, working within real size constraints
+- Replace a dependency too large to deploy (PyTorch) with a smaller, verified-equivalent alternative (ONNX Runtime)
+- Diagnose and fix deployment-specific failures: ABI mismatches, incomplete dependency trees, and race conditions in verifying a deployment actually finished
+- Provision and connect a Lambda function to real RDS and OpenSearch infrastructure
 - Apply least-privilege IAM principles when defining permissions for a Lambda-based orchestrator
-- Evaluate a Lambda deployment by reviewing its configuration, response, and observability outputs
+- Tear down every provisioned resource when finished, to avoid ongoing cost
 
-## Why Lambda for This System
+## Files in This Lesson
 
-Your orchestrator doesn't need to run continuously — it responds to incoming questions and returns an answer. This request-response pattern with no need for constant uptime is exactly what Lambda is designed for: you pay only for the compute time actually used, and AWS handles all the underlying server management.
+```
+bedrock_client.py          -- shared Claude-via-Bedrock helper
+onnx_embed.py               -- embeddings via ONNX Runtime (see Part 2 for why)
+orchestrator.py             -- the LangGraph orchestrator
+tokenomics_logger.py        -- logging and tracing
+lambda_handler.py           -- the actual Lambda entry point
+teardown.sh                 -- deletes every resource this lesson creates
+agents/
+  __init__.py
+  sql_agent.py               -- self-contained validated SQL agent
+  retrieval_agent.py         -- self-contained retrieval agent
+```
 
-The tradeoff: your orchestrator has several dependencies (LangGraph, database drivers, an OpenSearch client, Sentence Transformers) that together exceed the size limit for a Lambda function package deployed directly. Rather than reaching for a container image to solve this, split the dependencies into a **Lambda layer** — a separate zip uploaded once and attached to the function — so the function's own package stays small and fast to update, while the layer holds everything the function imports.
+Not included, download separately in Part 2: `model.onnx` and `tokenizer.json`.
 
 ## Part 1: The Lambda Handler
 
-Wrap this morning's orchestrator in a handler function matching the format Lambda expects:
+`lambda_handler.py` wraps the orchestrator in the format Lambda expects, calling `run_traced_query` so decision logging actually happens. Notice `tokenomics_logger.py` writes its log file to `/tmp/agent_decisions.jsonl`, not a relative path — **Lambda's deployment package directory is read-only at runtime; only `/tmp` is writable.**
 
-```python
-# lambda_handler.py
-import json
-from orchestrator import build_orchestrator
-from tokenomics_logger import run_traced_query  # from this afternoon's earlier lesson
-
-orchestrator = build_orchestrator()
-
-def handler(event, context):
-    try:
-        body = json.loads(event.get("body", "{}"))
-        question = body.get("question", "").strip()
-
-        if not question:
-            return {"statusCode": 400, "body": json.dumps({"error": "question is required"})}
-
-        result = run_traced_query(orchestrator, question)
-
-        sql_validation = None
-        if result.get("sql_result"):
-            sql_validation = result["sql_result"].get("metadata", {}).get("validation")
-
-        return {
-            "statusCode": 200,
-            "body": json.dumps({
-                "answer": result["final_answer"],
-                "route": result["route"],
-                "sql_validation": sql_validation,
-                "token_usage": result.get("token_usage", {})
-            })
-        }
-    except Exception as e:
-        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
-```
-
-Notice the `sql_validation` field is explicitly surfaced in the response — this is a direct continuation of Day 2's Trust but Verify principle: the validation status should be visible in the system's output, not hidden inside internal logic.
-
-> **Bug this fixes:** an earlier version of this handler called `orchestrator.invoke(...)` directly and imported `log_decision` without ever calling it — meaning the CloudWatch decision-trace claimed in Part 5's check below would never actually appear, since nothing in the handler wrote to it. Calling `run_traced_query` (from this afternoon's earlier tokenomics lesson) instead of the bare `orchestrator.invoke` is what actually produces that trace.
-
-> **✅ Check:** call the handler directly with a mock event, no Lambda required:
+> **✅ Check — do this before anything AWS-related:**
 > ```python
 > from lambda_handler import handler
 > event = {"body": '{"question": "How many active projects do we have?"}'}
 > print(handler(event, None))
 > ```
-> Confirm you get back a 200 status with `answer`, `route`, `sql_validation`, and `token_usage` all populated — this is the actual logic Lambda would run, so testing it this way catches real bugs even before anything touches AWS.
+> Needs your actual RDS, OpenSearch, and Bedrock access configured locally first.
 
-## Part 2: Packaging with a Lambda Layer
+## Part 2: Packaging
 
-Keep the function package itself small — just your own code — and put every dependency into one or more separate layers.
+### Why not `sentence-transformers`
 
-`sentence-transformers` (used by your Retrieval Agent for embeddings) pulls in PyTorch, which is large enough to risk exceeding a Lambda layer's 250MB unzipped limit on its own. Split dependencies across two layers rather than one, so a size problem in the heavy layer doesn't block everything else:
+`agents/retrieval_agent.py` needs to embed text for OpenSearch queries. `sentence-transformers` depends on PyTorch — and PyTorch's core runtime library alone (`libtorch_cpu.so`) is about 418MB, already over Lambda's 250MB unzipped limit by itself, before anything else. This isn't fixable by trimming; we confirmed it directly (an unfiltered install came to 5.9GB, and even forcing the CPU-only build, `torch/lib/` alone still measured 455MB).
 
-```bash
-# Layer 1: everything except sentence-transformers
-mkdir -p layer-core/python
-pip install langgraph boto3 psycopg2-binary opensearch-py requests-aws4auth python-dotenv \
-  -t layer-core/python --break-system-packages
-cd layer-core && zip -r ../orchestrator-core-layer.zip . && cd ..
-
-aws lambda publish-layer-version \
-  --layer-name orchestrator-core-deps \
-  --zip-file fileb://orchestrator-core-layer.zip \
-  --compatible-runtimes python3.11
-
-# Layer 2: sentence-transformers, kept separate because of its size
-mkdir -p layer-embeddings/python
-pip install sentence-transformers -t layer-embeddings/python --break-system-packages
-cd layer-embeddings && zip -r ../orchestrator-embeddings-layer.zip . && cd ..
-
-aws lambda publish-layer-version \
-  --layer-name orchestrator-embeddings-deps \
-  --zip-file fileb://orchestrator-embeddings-layer.zip \
-  --compatible-runtimes python3.11
-```
-
-Note the returned `LayerVersionArn` from **both** commands — you'll attach both to the function in Part 4.
+`onnx_embed.py` reimplements the same `all-MiniLM-L6-v2` pipeline using `onnxruntime` and `tokenizers` instead. **This was verified, not assumed** — compared against a real `sentence-transformers` install: cosine similarity 0.99999998–1.00000005, max absolute difference ~1.6e-7 (floating-point noise, not a real discrepancy). Getting there required one real fix: this specific model bakes L2 normalization into its own forward pass regardless of `encode()`'s `normalize_embeddings` flag — the first version's near-perfect cosine similarity alongside a large absolute difference was exactly the signature of a missing normalization step.
 
 ```bash
-# Package just your own code — no dependencies bundled here
-mkdir -p function_package
-cp lambda_handler.py orchestrator.py tokenomics_logger.py function_package/
-cp -r agents/ function_package/
-
-cd function_package && zip -r ../orchestrator_function.zip . && cd ..
+mkdir -p ~/deployment-package
+curl -L -o ~/deployment-package/model.onnx "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx"
+curl -L -o ~/deployment-package/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
 ```
 
-> **⚠️ Common issue:** `psycopg2` build failures are almost always solved by using `psycopg2-binary` in the pip install above, not `psycopg2` — the binary package avoids native dependency compilation, which matters here since the layer is built on your local machine, not necessarily the same OS/architecture Lambda runs on. If you hit an import error at runtime specifically (not at build time), rebuild the layer using the `--platform manylinux2014_x86_64 --only-binary=:all:` pip flags to force Lambda-compatible wheels.
+### Building the package
 
-> **⚠️ Common issue:** if the embeddings layer still exceeds the 250MB unzipped limit after being split out on its own, that's a real constraint worth reporting rather than working around blindly — a common production answer is moving embedding generation to its own dedicated service rather than bundling it into the same function as the orchestrator, but that's a bigger architectural change than this lesson expects you to make today.
+```bash
+cd ~/deployment-package
+
+pip install langgraph psycopg2-binary opensearch-py requests-aws4auth python-dotenv \
+  onnxruntime tokenizers numpy \
+  langchain-core pydantic pydantic-core langsmith \
+  langgraph-sdk ormsgpack orjson httpx httpcore truststore tenacity uuid_utils \
+  -t . --break-system-packages
+
+cp /path/to/bedrock_client.py /path/to/orchestrator.py /path/to/tokenomics_logger.py \
+   /path/to/lambda_handler.py /path/to/onnx_embed.py .
+cp -r /path/to/agents .
+```
+
+> **Why the second line of packages, when they look unrelated to anything this code touches:** every one of them was *removed* at some point during development on the theory that they're part of `langgraph`'s optional remote-hosted-service SDK (`langgraph_sdk`) rather than something local graph execution needs. **Three separate times, that theory was wrong** — `langchain_core` (needed the instant `StateGraph(...).compile()` runs, not just imports), `langsmith` (needed at import time by `langchain_core.runnables.base`, and specifically needing its full `_openapi_client` submodule, not just the top-level package), and `ormsgpack` (LangGraph's actual checkpoint serialization backend). Each was only caught by *actually invoking the compiled graph* — `import langgraph` succeeding, or even `build_orchestrator()` succeeding, was not enough to prove either of the first two were unnecessary. Install them upfront; don't rediscover this the hard way.
+
+**Now trim what's genuinely confirmed unused** — verified by real, repeated `graph.invoke()` calls, not just imports:
+
+```bash
+find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+find . -name "*.pyc" -delete
+find . -maxdepth 1 -name "*.dist-info" -exec rm -rf {} +
+find . -type d -name "tests" -exec rm -rf {} + 2>/dev/null
+find . -type d -name "test" -exec rm -rf {} + 2>/dev/null
+
+# huggingface_hub/hf_xet: support downloading FROM the HF Hub at runtime.
+# onnx_embed.py loads model.onnx/tokenizer.json from local files -- never
+# calls the Hub.
+rm -rf huggingface_hub huggingface_hub-*.dist-info hf_xet hf_xet-*.dist-info
+
+# langgraph_sdk's OWN remote-service transport, confirmed safe to leave out
+# by a real, complete graph.invoke() that reached all the way to a live
+# HTTPS request (not just an import) without these present:
+rm -rf websockets langchain_protocol google bin
+
+# LangSmith's remote tracing transport specifically -- not langsmith itself
+# (which IS required, see above), just its compression/gRPC dependencies,
+# which local execution never triggers:
+rm -rf zstandard zstandard-*.dist-info grpc grpc-*.dist-info
+
+# numpy submodules onnx_embed.py's actual usage (np.array, np.expand_dims,
+# np.broadcast_to, np.sum, np.clip, np.linalg.norm) never touches:
+rm -rf numpy/f2py numpy/ma numpy/polynomial numpy/random/_examples numpy/matlib.py numpy/matlib.pyi
+
+# onnxruntime's own bundled sample/test .onnx files -- we load model.onnx
+# directly, never these:
+rm -rf onnxruntime/datasets
+
+du -sb . | awk '{printf "%.2f MB\n", $1/1024/1024}'
+```
+
+In our own build, this landed at **239MB** — confirmed stable, under the 250MB limit, with real headroom.
+
+> **⚠️ The only verification that actually catches problems: really invoke the graph, not just import or compile it.**
+> ```bash
+> PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -c "
+> import sys
+> sys.path.insert(0, 'agents')
+> from orchestrator import build_orchestrator
+> graph = build_orchestrator()
+> result = graph.invoke({
+>     'question': 'test question', 'route': None, 'sql_result': None,
+>     'retrieval_result': None, 'final_answer': None, 'token_usage': None
+> })
+> " 2>&1 | tail -5
+> ```
+> `import langgraph` succeeding proves nothing about `.compile()`. `build_orchestrator()` succeeding proves nothing about `.invoke()`. Only a real invocation exercises the full path Lambda actually takes. Expect this specific test to fail with an OpenSearch connection error (no real endpoint configured yet) — that's a *success* signal, meaning everything upstream of real infrastructure works. Any `ModuleNotFoundError` instead means a real gap.
+
+> **⚠️ `-t .` doesn't overwrite existing files.** If you ever need to fully reinstall a package that's already partially present (e.g., fixing a bad prior removal), `rm -rf <package-dir>` first, then reinstall into the empty space — otherwise pip silently skips writing anything, with only a `WARNING: Target directory ... already exists` to tell you why nothing changed.
+
+```bash
+cd ~/deployment-package
+zip -r ../orchestrator_function.zip . -x "*.git*"
+```
 
 ## Part 3: IAM Roles for Production
 
-**Run this part for real — with two firm limits, confirmed in this sandbox:**
-
-1. **Attaching the three `*FullAccess` managed policies below will fail** with `AccessDenied` — this identity can only attach a narrow, pre-approved set of managed policies (the basic Lambda execution role used in the first `attach-role-policy` call works fine). Use the scoped inline policy shown further down instead — it actually works, and it's a better answer anyway (see the note below on why).
-2. **Whatever role and policy you create here, you cannot delete.** This identity has `iam:CreateRole` and `iam:PutRolePolicy` but not `iam:DeleteRolePolicy`, and a role can't be deleted while it still has a policy attached — so once you create it, it's permanent for the life of this AWS account. **Use a role name that includes your own name or initials** (e.g. `orchestrator-lambda-role-<yourname>`) so instructors can tell whose is whose later, and only create it once — don't experiment by creating and re-creating.
-
-Following the least-privilege principle from Module 3 Day 1's IAM lesson, scope this role to exactly what the orchestrator needs — no more.
+**Two firm limits, confirmed in this sandbox:**
+1. Only `AWSLambdaBasicExecutionRole` and an inline policy work — every `*FullAccess` managed policy attachment is denied.
+2. Whatever role and policy you create is **permanent** — no deletion possible. Name it with your own initials.
 
 ```bash
 cat > trust.json <<'EOF'
@@ -161,82 +166,166 @@ cat > trust.json <<'EOF'
 EOF
 
 aws iam create-role --role-name orchestrator-lambda-role-<yourname> --assume-role-policy-document file://trust.json
-
 aws iam attach-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+cat > scoped-policy.json <<'EOF'
+{"Version":"2012-10-17","Statement":[
+  {"Effect":"Allow","Action":"bedrock:InvokeModel","Resource":"*"}
+]}
+EOF
+aws iam put-role-policy \
+  --role-name orchestrator-lambda-role-<yourname> \
+  --policy-name orchestrator-inline-policy \
+  --policy-document file://scoped-policy.json
 ```
 
-The three commands below are what a real deployment would need for Bedrock, OpenSearch, and RDS access — **explain, don't run these specific ones**, since the managed `*FullAccess` policies are denied in this sandbox:
+## Part 4: Provisioning Real Infrastructure
+
+### RDS
 
 ```bash
-aws iam attach-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-arn arn:aws:iam::aws:policy/AmazonBedrockFullAccess
-aws iam attach-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-arn arn:aws:iam::aws:policy/AmazonOpenSearchServiceFullAccess
-aws iam attach-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-arn arn:aws:iam::aws:policy/AmazonRDSFullAccess
+aws rds create-db-instance \
+  --db-instance-identifier orchestrator-db-<yourname> \
+  --db-instance-class db.t3.micro \
+  --engine postgres \
+  --engine-version 16 \
+  --master-username dbadmin \
+  --master-user-password '<a-real-password>' \
+  --allocated-storage 20 \
+  --db-name bootcamp \
+  --publicly-accessible \
+  --backup-retention-period 0
+
+aws rds wait db-instance-available --db-instance-identifier orchestrator-db-<yourname>
+
+SG_ID=$(aws rds describe-db-instances --db-instance-identifier orchestrator-db-<yourname> \
+  --query "DBInstances[0].VpcSecurityGroups[0].VpcSecurityGroupId" --output text)
+aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --protocol tcp --port 5432 --cidr 0.0.0.0/0
 ```
 
-> **What actually works here, and why it's arguably the better lesson anyway:** a scoped **inline** policy via `put-role-policy` succeeds in this sandbox where the broad managed policies don't. This is a real, runnable stand-in — and it's exactly the least-privilege pattern the note below already says a production engagement should use instead of `*FullAccess`:
-> ```bash
-> cat > scoped-policy.json <<'EOF'
-> {"Version":"2012-10-17","Statement":[
->   {"Effect":"Allow","Action":"bedrock:InvokeModel","Resource":"*"}
-> ]}
-> EOF
-> aws iam put-role-policy --role-name orchestrator-lambda-role-<yourname> --policy-name orchestrator-inline-policy --policy-document file://scoped-policy.json
-> ```
-> Remember: this inline policy is also permanent once created (no `iam:DeleteRolePolicy` here) — write it once, get it right, don't iterate by trial and error.
+> **⚠️ `dbadmin`, never `admin`** — RDS rejects `admin` outright as a reserved word for the `postgres` engine.
 
-> **Note:** The `*FullAccess` managed policies above are what many teams reach for "for bootcamp simplicity," and it's worth understanding why they're tempting: one line, no need to enumerate exact actions. But a real production engagement should write custom policies scoped to the specific resources (a single OpenSearch domain, a single RDS instance) rather than full-access managed policies — the same least-privilege principle from Day 1. This sandbox's restriction, ironically, forces the stricter and more correct answer.
+Create the schema (`clients`, `projects`, `consultants`, `invoices` — the schema `agents/sql_agent.py`'s `SCHEMA_CONTEXT` assumes) and seed it, then connect with `sslmode=require` — RDS's default parameter group rejects unencrypted connections.
 
-## Part 4: Deploying the Function
+### OpenSearch
 
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/orchestrator-lambda-role-<yourname>"
-CORE_LAYER_ARN="<paste the LayerVersionArn from the core-deps layer here>"
-EMBEDDINGS_LAYER_ARN="<paste the LayerVersionArn from the embeddings layer here>"
+
+python3 -c "
+import json
+policy = {
+  'Version': '2012-10-17',
+  'Statement': [{
+    'Effect': 'Allow',
+    'Principal': {'AWS': f'arn:aws:iam::${ACCOUNT_ID}:role/orchestrator-lambda-role-<yourname>'},
+    'Action': 'es:*',
+    'Resource': f'arn:aws:es:us-east-1:${ACCOUNT_ID}:domain/orchestrator-search-<yourname>/*'
+  }]
+}
+import sys
+sys.stdout.write(json.dumps(policy))
+" > opensearch-access-policy.json
+```
+
+> **⚠️ No trailing newline in this file.** `print()` appends one; a JSON policy with a stray trailing newline fails `--access-policies`' validation regex (`.*`, which doesn't match across a newline by default) with a confusing generic error. Use `sys.stdout.write()`, not `print()`.
+
+```bash
+aws opensearch create-domain \
+  --domain-name orchestrator-search-<yourname> \
+  --engine-version OpenSearch_2.11 \
+  --cluster-config InstanceType=t3.small.search,InstanceCount=1 \
+  --ebs-options EBSEnabled=true,VolumeType=gp3,VolumeSize=10 \
+  --access-policies file://opensearch-access-policy.json \
+  --domain-endpoint-options EnforceHTTPS=true
+```
+
+This takes 15-20 minutes. Check with `aws opensearch describe-domain --domain-name orchestrator-search-<yourname> --query "DomainStatus.Processing"` — `False` means ready.
+
+**Create the index with `space_type: "innerproduct"`, not `"cosinesimil"`:**
+
+```python
+index_body = {
+    "settings": {"index.knn": True},
+    "mappings": {
+        "properties": {
+            "content": {"type": "text"},
+            "source": {"type": "keyword"},
+            "embedding": {
+                "type": "knn_vector",
+                "dimension": 384,
+                "method": {"name": "hnsw", "space_type": "innerproduct", "engine": "faiss"}
+            }
+        }
+    }
+}
+```
+
+> **⚠️ FAISS's `hnsw` method has never supported `cosinesimil`** — only `nmslib` and `lucene` engines do. This isn't a version quirk to route around; it's a permanent FAISS limitation. The fix is mathematically exact, not an approximation: since `onnx_embed.py`'s output is L2-normalized, cosine similarity and inner product are identical for unit-length vectors. `innerproduct` gives the same ranking `cosinesimil` would have.
+
+## Part 5: Deploying and Testing
+
+```bash
+BUCKET="lambda-deploy-${ACCOUNT_ID}-<yourname>"
+aws s3 mb "s3://${BUCKET}"
+aws s3 cp ~/orchestrator_function.zip "s3://${BUCKET}/orchestrator_function.zip"
 
 aws lambda create-function \
   --function-name multi-agent-orchestrator \
-  --runtime python3.11 \
+  --runtime python3.12 \
   --handler lambda_handler.handler \
-  --zip-file fileb://orchestrator_function.zip \
-  --role "$ROLE_ARN" \
-  --layers "$CORE_LAYER_ARN" "$EMBEDDINGS_LAYER_ARN" \
+  --code S3Bucket="${BUCKET}",S3Key=orchestrator_function.zip \
+  --role "arn:aws:iam::${ACCOUNT_ID}:role/orchestrator-lambda-role-<yourname>" \
   --timeout 120 \
   --memory-size 512 \
-  --environment "Variables={AWS_REGION=us-east-1,OPENSEARCH_ENDPOINT=your_endpoint,OPENSEARCH_INDEX=documents,RDS_HOST=your_host,RDS_PORT=5432,RDS_DATABASE=bootcamp,RDS_USER=dbadmin,RDS_PASSWORD=your_password}"
+  --environment "Variables={OPENSEARCH_ENDPOINT=<your-domain-endpoint>,RDS_HOST=<your-rds-endpoint>,RDS_PORT=5432,RDS_DATABASE=bootcamp,RDS_USER=dbadmin,RDS_PASSWORD=<your-password>}"
 ```
 
-> **Note what's *not* in that environment variable list:** no `ANTHROPIC_API_KEY`. Nothing in this orchestrator calls anything but `bedrock_client.py`'s `invoke_claude()`, which authenticates through the Lambda's own IAM role, not an API key — there's no code path anywhere in this stack that would ever read that variable.
+> **⚠️ `--runtime python3.12`, matched to whatever Python version built your package** — not assumed to be 3.11. Compiled extensions (`.so` files) are generally not binary-compatible across Python minor versions; check `python3 --version` and every `.so` filename in your package (`find . -name "*.so"`) before choosing. A mismatch produces a confusing `ModuleNotFoundError` for a package that's genuinely present, not a clear version error.
 
-> **⚠️ Don't use `admin` as `RDS_USER`.** RDS rejects it outright as the master username for the `postgres` engine — `MasterUsername admin cannot be used as it is a reserved word used by the engine`. Use `dbadmin` (shown above) or any other non-reserved name, matching whatever you set during RDS provisioning.
-
-> **⚠️ Common issue:** Lambda timeout on multi-agent queries, especially "both"-routed questions calling two agents plus synthesis. The default 3-second timeout will fail almost every time — 120 seconds gives enough headroom.
-
-> **⚠️ If this specific command fails with an authorization error:** that's new, useful information about this sandbox's actual permissions, not a mistake in the steps above — note exactly which action was denied (it'll be in the error message) and flag it the same way the ECR restriction was found, so this lesson can be corrected again if needed.
-
-> **If you update your code after this initial deploy**, use `aws lambda update-function-code --function-name multi-agent-orchestrator --zip-file fileb://orchestrator_function.zip` — you only need to touch the layers again if your dependencies themselves change, not your own code.
-
-## Part 5: Testing the Deployed System
+> **⚠️ After any `update-function-code`, wait for real completion before testing — don't guess with `sleep`.**
+> ```bash
+> aws lambda wait function-updated-v2 --function-name multi-agent-orchestrator
+> ```
+> A fixed `sleep` duration isn't a reliable signal that Lambda's internal propagation across execution environments has actually finished — we hit exactly this: two invocations succeeded, a third (a fresh cold start) failed with an error we'd already fixed, because it was still running stale code. `wait` blocks until AWS itself confirms completion.
 
 ```bash
-cat > test_event.json <<'EOF'
-{"body": "{\"question\": \"How many active projects do we have?\"}"}
-EOF
-
-aws lambda invoke \
-  --function-name multi-agent-orchestrator \
-  --payload file://test_event.json \
-  --cli-binary-format raw-in-base64-out \
-  response.json
-
+echo '{"body": "{\"question\": \"How many active projects do we have, and what is our onboarding policy?\"}"}' > test_both.json
+aws lambda invoke --function-name multi-agent-orchestrator --payload file://test_both.json \
+  --cli-binary-format raw-in-base64-out response.json
 cat response.json
-aws logs tail /aws/lambda/multi-agent-orchestrator --follow
 ```
 
-> **✅ Check:** Confirm your response includes `answer`, `route`, `sql_validation`, and `token_usage` fields, and that CloudWatch Logs show the decision trace from Part 1's `run_traced_query` call. Compare this against what you already saw locally in Part 1 — same response shape, same trace, now coming from an actual deployed Lambda instead of a direct function call. This is the same deployment your capstone builds on directly.
+> **✅ What real success looks like:** `"route": "both"`, `"sql_validation": "PASSED"`, an answer that correctly combines a real RDS query result with a real OpenSearch-retrieved document, explicitly attributing each part to its source agent, and non-zero `token_usage`. This is a real, working, end-to-end multi-agent system — confirmed, not assumed.
+
+## Part 6: Tear Down When Finished
+
+RDS and OpenSearch both bill continuously while running — tear down as soon as you're done testing. See `teardown.sh`, included alongside this README.
+
+```bash
+chmod +x teardown.sh
+./teardown.sh --name <yourname>              # dry run -- lists what would be deleted
+./teardown.sh --name <yourname> --confirm    # actually deletes
+```
+
+`--name` is required — it's how the script knows which resources are yours (`orchestrator-db-<yourname>`, `orchestrator-search-<yourname>`, etc.), matching whatever suffix you chose in Parts 3-4. Running it without `--name` just prints usage instructions and exits — that's expected behavior, not an error; the script deliberately never guesses whose resources to look for.
+
+`--confirm` still isn't the final safety gate — you'll be prompted to type `DELETE` (all capital letters) before anything actually happens. Skipping that, or typing anything else, aborts before any deletion call is made.
+
+**One thing it cannot do:** delete the IAM role or its inline policy — `iam:DeleteRolePolicy` is blocked in this sandbox, and a role can't be deleted while a policy is attached. This isn't a cost concern (IAM itself is free), so it's safe to leave in place permanently.
+
+**One thing it doesn't wait for:** RDS and OpenSearch deletions don't finish the moment the script returns — it kicks off the deletion and says so, but both resources take several more minutes to actually finish tearing down in the background. Confirm they're genuinely gone afterward rather than assuming "the script ran" means "billing has stopped":
+
+```bash
+aws rds describe-db-instances --db-instance-identifier orchestrator-db-<yourname>
+aws opensearch describe-domain --domain-name orchestrator-search-<yourname>
+```
+
+Both should eventually return a "not found" style error once deletion is fully complete.
 
 ## Resources
 
-- [AWS Lambda Layers](https://docs.aws.amazon.com/lambda/latest/dg/chapter-layers.html)
 - [AWS Lambda Deployment Packages (.zip)](https://docs.aws.amazon.com/lambda/latest/dg/python-package.html)
 - [AWS IAM Best Practices](https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html)
+- [ONNX Runtime Documentation](https://onnxruntime.ai/docs/)
+- [OpenSearch k-NN methods and engines](https://docs.opensearch.org/latest/mappings/supported-field-types/knn-methods-engines/)
