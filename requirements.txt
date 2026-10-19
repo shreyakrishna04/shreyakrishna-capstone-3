@@ -1,0 +1,8 @@
+boto3
+python-dotenv
+langgraph
+opensearch-py
+requests-aws4auth
+sentence-transformers
+psycopg2-binary
+onnxruntime

@@ -1,0 +1,139 @@
+
+Route: retrieval
+
+Final answer:
+## Acme Consulting's Remote Work Policy Summary
+
+Based on the Retrieval Agent's findings from **remote-work-policy.pdf**, here are the key provisions:
+
+**Eligibility**
+Employees must complete a 90-day probationary period and must not require regular physical presence at client sites. New hires documented as fully remote in their offer letter are exempt from the waiting period. The policy covers full-time and part-time employees only — not independent contractors.
+
+**Availability**
+Remote employees must be available between **10:00 AM and 3:00 PM in their local time zone**. Schedules are otherwise flexible, provided weekly hour expectations and client meetings are met.
+
+**Equipment & Security**
+The company provides a laptop, monitor, and VPN access. Company data must remain on company-issued devices and cannot be stored on personal cloud storage, email, or removable media. VPN use is mandatory on public Wi-Fi, and lost/stolen equipment must be reported to IT Security **within four hours**.
+
+**Home Office Stipend**
+Employees may claim up to **$500 per year** for home office equipment, submitted by **December 15**. Unused amounts do not roll over, and internet/utilities are not covered.
+
+**Performance & Review**
+Arrangements are reviewed annually. Managers must provide a **30-day improvement window** before revoking remote work privileges, except in cases of security violations.
+
+**International Work**
+Temporary work from another country is permitted up to **20 business days per year**, subject to manager approval and an IT Security review.
+
+*[Source: Retrieval Agent — remote-work-policy.pdf]*
+
+Complete state:
+{'final_answer': "## Acme Consulting's Remote Work Policy Summary\n"
+                 '\n'
+                 "Based on the Retrieval Agent's findings from "
+                 '**remote-work-policy.pdf**, here are the key provisions:\n'
+                 '\n'
+                 '**Eligibility**\n'
+                 'Employees must complete a 90-day probationary period and '
+                 'must not require regular physical presence at client sites. '
+                 'New hires documented as fully remote in their offer letter '
+                 'are exempt from the waiting period. The policy covers '
+                 'full-time and part-time employees only — not independent '
+                 'contractors.\n'
+                 '\n'
+                 '**Availability**\n'
+                 'Remote employees must be available between **10:00 AM and '
+                 '3:00 PM in their local time zone**. Schedules are otherwise '
+                 'flexible, provided weekly hour expectations and client '
+                 'meetings are met.\n'
+                 '\n'
+                 '**Equipment & Security**\n'
+                 'The company provides a laptop, monitor, and VPN access. '
+                 'Company data must remain on company-issued devices and '
+                 'cannot be stored on personal cloud storage, email, or '
+                 'removable media. VPN use is mandatory on public Wi-Fi, and '
+                 'lost/stolen equipment must be reported to IT Security '
+                 '**within four hours**.\n'
+                 '\n'
+                 '**Home Office Stipend**\n'
+                 'Employees may claim up to **$500 per year** for home office '
+                 'equipment, submitted by **December 15**. Unused amounts do '
+                 'not roll over, and internet/utilities are not covered.\n'
+                 '\n'
+                 '**Performance & Review**\n'
+                 'Arrangements are reviewed annually. Managers must provide a '
+                 '**30-day improvement window** before revoking remote work '
+                 'privileges, except in cases of security violations.\n'
+                 '\n'
+                 '**International Work**\n'
+                 'Temporary work from another country is permitted up to **20 '
+                 'business days per year**, subject to manager approval and an '
+                 'IT Security review.\n'
+                 '\n'
+                 '*[Source: Retrieval Agent — remote-work-policy.pdf]*',
+ 'question': 'Summarize the remote work policy.',
+ 'retrieval_result': {'answer': "## Summary of Acme Consulting's Remote Work "
+                                'Policy\n'
+                                '\n'
+                                'Based on the policy documents, here is a '
+                                'summary of the key provisions:\n'
+                                '\n'
+                                '**Eligibility**\n'
+                                'Employees must complete a 90-day probationary '
+                                'period and not require regular physical '
+                                'presence at client sites. New hires hired as '
+                                'fully remote from the start are exempt from '
+                                'the waiting period if documented in their '
+                                'offer letter. The policy applies to full-time '
+                                'and part-time employees only, not independent '
+                                'contractors. [Source 1]\n'
+                                '\n'
+                                '**Availability**\n'
+                                'All remote employees must be available '
+                                'between **10:00 AM and 3:00 PM in their local '
+                                'time zone**. Outside those core hours, '
+                                'schedules are flexible as long as weekly hour '
+                                'expectations and client meetings are met. '
+                                '[Source 1]\n'
+                                '\n'
+                                '**Equipment & Security**\n'
+                                'The company provides a laptop, monitor, and '
+                                'VPN access. Company data must stay on '
+                                'company-issued devices and never be stored on '
+                                'personal cloud storage, email, or removable '
+                                'media. VPN use is mandatory on public Wi-Fi. '
+                                'Lost/stolen equipment must be reported to IT '
+                                'Security **within four hours**. [Source 1]\n'
+                                '\n'
+                                '**Home Office Stipend**\n'
+                                'Employees can claim up to **$500 per year** '
+                                'for home office equipment. Claims must be '
+                                'submitted by **December 15**, and unused '
+                                'amounts do not roll over. Internet and '
+                                'utilities are **not** covered. [Source 1] '
+                                '[Source 2]\n'
+                                '\n'
+                                '**Performance & Review**\n'
+                                'Arrangements are reviewed annually. Managers '
+                                'must provide a **30-day improvement window** '
+                                'before revoking remote work, except in cases '
+                                'of security policy violations. [Source 1] '
+                                '[Source 2]\n'
+                                '\n'
+                                '**International Work**\n'
+                                'Temporary work from another country is '
+                                'permitted for up to **20 business days per '
+                                'year** with manager approval and an IT '
+                                'Security review. [Source 2]',
+                      'metadata': {'chunk_count': 5,
+                                   'excluded_sources': ['DPN_Krishna_Resume.pdf'],
+                                   'grounded': True,
+                                   'min_score': 0.35,
+                                   'token_usage': {'input': 2513,
+                                                   'output': 396}},
+                      'sources': ['remote-work-policy.pdf',
+                                  'q2-2026-client-report.pdf',
+                                  'cloud-migration-playbook.pdf'],
+                      'success': True},
+ 'route': 'retrieval',
+ 'sql_result': None,
+ 'token_usage': {'input': 497, 'output': 370}}

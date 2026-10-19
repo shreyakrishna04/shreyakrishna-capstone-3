@@ -1,0 +1,32 @@
+RDS FOUNDATION CHECK
+
+Table: clients
+Success: True
+Answer: The **clients** table contains **5 rows**.
+Sources: ['SQL: SELECT COUNT(*) AS row_count FROM clients;']
+Metadata: {'validation': 'PASSED', 'token_usage': {'input': 55, 'output': 14}}
+
+Table: projects
+Success: True
+Answer: The **projects** table contains **6 rows**.
+Sources: ['SQL: SELECT COUNT(*) AS row_count FROM projects;']
+Metadata: {'validation': 'PASSED', 'token_usage': {'input': 55, 'output': 14}}
+
+Table: consultants
+Success: True
+Answer: The **consultants** table has **6 rows**.
+Sources: ['SQL: SELECT COUNT(*) AS row_count FROM consultants;']
+Metadata: {'validation': 'PASSED', 'token_usage': {'input': 57, 'output': 15}}
+
+Table: invoices
+Success: True
+Answer: There are **7 rows** in the invoices table.
+Sources: ['SQL: SELECT COUNT(*) AS row_count FROM invoices;']
+Metadata: {'validation': 'PASSED', 'token_usage': {'input': 57, 'output': 16}}
+
+OPENSEARCH FOUNDATION CHECK
+Index: documents
+Document count: 10
+
+OVERALL RESULT
+PASS: RDS tables and OpenSearch are reachable and populated.

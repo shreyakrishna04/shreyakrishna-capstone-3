@@ -1,0 +1,26 @@
+
+Route: sql
+
+Final answer:
+Based on the SQL Agent results, we currently have **4 active projects**.
+
+*Source: SQL Agent – `SELECT COUNT(*) AS active_projects_count FROM projects WHERE status = 'active'`*
+
+Complete state:
+{'final_answer': 'Based on the SQL Agent results, we currently have **4 active '
+                 'projects**.\n'
+                 '\n'
+                 '*Source: SQL Agent – `SELECT COUNT(*) AS '
+                 'active_projects_count FROM projects WHERE status = '
+                 "'active'`*",
+ 'question': 'How many active projects do we have?',
+ 'retrieval_result': None,
+ 'route': 'sql',
+ 'sql_result': {'answer': 'We have **4** active projects.',
+                'metadata': {'token_usage': {'input': 41, 'output': 11},
+                             'validation': 'PASSED'},
+                'sources': ['SQL: SELECT COUNT(*) AS active_projects_count\n'
+                            'FROM projects\n'
+                            "WHERE status = 'active'"],
+                'success': True},
+ 'token_usage': {'input': 108, 'output': 48}}

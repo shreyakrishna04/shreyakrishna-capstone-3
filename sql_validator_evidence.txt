@@ -1,0 +1,39 @@
+SQL VALIDATOR TEST RESULTS
+
+Test: Valid SELECT
+Query: SELECT COUNT(*) FROM projects;
+Expected valid: True
+Actual valid: True
+Reason: OK
+Status: PASS
+
+Test: Destructive DELETE
+Query: DELETE FROM projects WHERE id = 1;
+Expected valid: False
+Actual valid: False
+Reason: Blocked: 'DELETE' is not permitted.
+Status: PASS
+
+Test: Column containing blocked word
+Query: SELECT deleted_at FROM clients;
+Expected valid: True
+Actual valid: True
+Reason: OK
+Status: PASS
+
+Test: Stacked query containing blocked keyword
+Query: SELECT id FROM projects; DELETE FROM projects;
+Expected valid: False
+Actual valid: False
+Reason: Blocked: 'DELETE' is not permitted.
+Status: PASS
+
+Test: Harmless stacked SELECT query
+Query: SELECT id FROM projects; SELECT id FROM clients;
+Expected valid: False
+Actual valid: False
+Reason: Blocked: multiple statements detected.
+Status: PASS
+
+OVERALL RESULT
+PASS: All five SQL validator cases passed.

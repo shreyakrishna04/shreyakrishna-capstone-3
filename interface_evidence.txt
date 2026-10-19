@@ -1,0 +1,14 @@
+
+SQL agent
+Question: How many active projects do we have?
+Top-level keys: ['answer', 'metadata', 'sources', 'success']
+Metadata: {'validation': 'PASSED', 'token_usage': {'input': 41, 'output': 12}}
+Sources: ["SQL: SELECT COUNT(*) AS active_project_count\nFROM projects\nWHERE status = 'active'"]
+
+Retrieval agent
+Question: Summarize the remote work policy.
+Top-level keys: ['answer', 'metadata', 'sources', 'success']
+Metadata: {'chunk_count': 5, 'grounded': True, 'min_score': 0.35, 'excluded_sources': ['DPN_Krishna_Resume.pdf'], 'token_usage': {'input': 2513, 'output': 381}}
+Sources: ['remote-work-policy.pdf', 'q2-2026-client-report.pdf', 'cloud-migration-playbook.pdf']
+
+PASS: Both tools return the exact shared interface.

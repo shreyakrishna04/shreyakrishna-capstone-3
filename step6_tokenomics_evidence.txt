@@ -1,0 +1,10 @@
+
+TOKENOMICS SUMMARY
+--------------------------------------------------------------------------------
+sql_generation: calls=5 input=926 output=129 total=1055 cost_usd=0.0047130000
+sql_interpretation: calls=5 input=467 output=278 total=745 cost_usd=0.0055710000
+retrieval_generation: calls=6 input=13210 output=1119 total=14329 cost_usd=0.0564150000
+synthesis: calls=10 input=3389 output=1762 total=5151 cost_usd=0.0365970000
+--------------------------------------------------------------------------------
+Total cost: $0.1032960000
+Most tokens: retrieval_generation

@@ -1,0 +1,55 @@
+
+Route: both
+
+Final answer:
+There are **4 active projects** [SQL: `SELECT COUNT(*) AS active_project_count FROM projects WHERE status = 'active'`].
+
+The **remote-work core hours** require all remote employees to be available and responsive between **10:00 AM and 3:00 PM in their local time zone** [Retrieval Agent: remote-work-policy.pdf].
+
+Complete state:
+{'final_answer': 'There are **4 active projects** [SQL: `SELECT COUNT(*) AS '
+                 'active_project_count FROM projects WHERE status = '
+                 "'active'`].\n"
+                 '\n'
+                 'The **remote-work core hours** require all remote employees '
+                 'to be available and responsive between **10:00 AM and 3:00 '
+                 'PM in their local time zone** [Retrieval Agent: '
+                 'remote-work-policy.pdf].',
+ 'question': 'How many active projects do we have, and what are the '
+             'remote-work core hours?',
+ 'retrieval_result': {'answer': '**Remote-Work Core Hours:**\n'
+                                'All remote employees must be available and '
+                                'responsive between **10:00 AM and 3:00 PM in '
+                                'their local time zone** [Source 1].\n'
+                                '\n'
+                                '**Number of Active Projects:**\n'
+                                'I cannot find this information in the '
+                                'provided documents. The provided context only '
+                                'references one client engagement (the Q2 2026 '
+                                'quarterly report), but it does not provide a '
+                                'comprehensive count of all active projects '
+                                'across Acme Consulting.',
+                      'metadata': {'chunk_count': 5,
+                                   'excluded_sources': ['DPN_Krishna_Resume.pdf'],
+                                   'grounded': True,
+                                   'min_score': 0.35,
+                                   'token_usage': {'input': 2523,
+                                                   'output': 100}},
+                      'sources': ['remote-work-policy.pdf',
+                                  'q2-2026-client-report.pdf',
+                                  'cloud-migration-playbook.pdf'],
+                      'success': True},
+ 'route': 'both',
+ 'sql_result': {'answer': 'Based on the data provided, there are **4 active '
+                          'projects**.\n'
+                          '\n'
+                          'However, the data provided does not contain '
+                          'information about **remote-work core hours** — that '
+                          'information is not available in the given dataset.',
+                'metadata': {'token_usage': {'input': 51, 'output': 46},
+                             'validation': 'PASSED'},
+                'sources': ['SQL: SELECT COUNT(*) AS active_project_count\n'
+                            'FROM projects\n'
+                            "WHERE status = 'active'"],
+                'success': True},
+ 'token_usage': {'input': 438, 'output': 88}}
